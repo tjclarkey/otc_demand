@@ -1,0 +1,344 @@
+---
+title: "PSET 4 - Problem 1"
+author: "T"
+date: "4/21/2020"
+output: html_document
+---
+
+___BEFORE SUBMIT___
+_1) NEED TO TAKE THE LOG OF ALL VARIABLES FOR THE REGRESSIONS..._
+_2) Test all code_
+
+__AFTER SUBMISSION__
+_1) Calculate both types of elasticities_
+_2) Dashboard_
+_3) Non-Linear AIDS_
+_4) What other variant of AIDS can increase accuracy?_
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(plyr)
+library(dplyr)
+library(readr)
+source('~/Documents/R/132/PSET 4/q1funs.R')
+data <- read_csv("OTC_Data.csv")
+data <- as.tibble(data)
+```
+
+Calculate the Market Share for each obersvation
+```{r}
+fn1 <- function(x) {
+  x / sum(x)
+}
+data <- ddply(data, .(week, store), transform, mktshare = fn1(sales))
+```
+
+Mean and standard deviation by product for: price, wholesale price, and market share.
+```{r}
+mean <- matrix(rep(0), nrow = 9, ncol = 3)
+sd <- matrix(rep(0), nrow = 9, ncol = 3)
+rows <- c("Ty25", "Ty50", "Ty100", "Ad25", "Ad50", "Ad100", "Bay25", "Bay50", "Bay100")
+cols <- c("Price", "Wholesale Price", "Market Share")
+dimnames(mean) = list(rows, cols)
+dimnames(sd) = list(rows, cols)
+
+count <- 1
+
+for (i in unique(data$brand_name)) {
+  for (j in unique(data$size)) {
+    uproduct <- filter(data, brand_name == i, size == j)
+    
+    mean[count, 1] <- mean(uproduct$price)
+    mean[count, 2] <- mean(uproduct$cost)
+    mean[count, 3] <- mean(uproduct$mktshare)
+    
+    sd[count, 1] <- sd(uproduct$price)
+    sd[count, 2] <- sd(uproduct$cost)
+    sd[count, 3] <- sd(uproduct$mktshare)
+    
+    count <- count + 1
+  }
+}
+# Try to perform this using ddply
+```
+
+Estimate the single-product demand equation
+```{r}
+lm(sales ~ price, data)
+```
+
+
+```{r}
+# Create expenditure and expenditure share columns
+data <- mutate(data, exp = price * sales)
+fn <- function(x) {
+  x / sum(x)
+}
+data <- ddply(data, .(store, week, brand_name), transform, exp_share = fn(exp))
+
+
+# Create a product name column
+data <- unite(data, col = product, c(brand_name, size), sep = "", remove = FALSE)
+
+
+# Create a dummy variable for each brand to use in interaction terms
+data <- mutate(data,
+               Tylenol100 = ifelse(data$product == "Tylenol100",1,0),
+               Tylenol50 = ifelse(data$product == "Tylenol50",1,0),
+               Tylenol25 = ifelse(data$product == "Tylenol25",1,0),
+               Advil100 = ifelse(data$product == "Advil100",1,0),
+               Advil50 = ifelse(data$product == "Advil50",1,0),
+               Advil25 = ifelse(data$product == "Advil25",1,0),
+               Bayer100 = ifelse(data$product == "Bayer100",1,0),
+               Bayer50 = ifelse(data$product == "Bayer50",1,0),
+               Bayer25 = ifelse(data$product == "Bayer25",1,0)
+)
+
+
+# Create a column which gives the beta term
+fn3 <- function(x,y,z) {
+  sum(x) / (sum(y*log(z))) # numerator gives the segment specific expenditure, denominator gives the stone price index
+}
+regdata <- ddply(data, .(store, week, brand_name), transform, XdivP = fn3(exp, exp_share, price))
+
+# Create a variable for the stone price index
+stone <- function(x,y) {
+  sum(x*log(y))
+}
+regdata <- ddply(regdata, .(store, week, brand_name), transform, priceindex = stone(exp_share, price))
+
+# Create a column for the Hausman Instrument
+haus <- function(x) {
+  mean(x) - (x / length(unique(regdata$store)))
+}
+regdata <- ddply(regdata, .(product, week), transform, hausman = haus(price))
+
+# Create a column for the total quantity sold in each segment
+segtot <- function(x) {
+  sum(x)
+}
+regdata <- ddply(regdata, .(store, week, brand_name), transform, total_sales = segtot(sales))
+```
+
+Do all widening in one code block
+I need to include individual columns for the cost of each product, the price of each product, and the hausman instrument for each product
+```{r}
+library(reshape2)
+
+wide_format <- regdata %>%
+  select(price, cost, store, week, brand_name, XdivP, size, hausman, total_sales, priceindex) %>%
+  mutate(
+    ProductPrice = paste(brand_name, size, "Price", sep = ""),
+    ProductCost = paste(brand_name, size, "Cost", sep = ""),
+    BrandBeta = paste(brand_name, "Beta", sep = ""),
+    ProductHausman = paste(brand_name, size, "Hausman", sep = ""))
+#    ProductSales = paste(brand_name, "Total_Sales", sep = "_"),
+
+widen_price <- dcast(wide_format, store + week ~ ProductPrice, value.var = "price")
+widen_cost <- dcast(wide_format, store + week ~ ProductCost, value.var = "cost")
+widen_beta <- dcast(wide_format, store + week + brand_name + size ~ BrandBeta, value.var = "XdivP")
+widen_hausman <- dcast(wide_format, store + week ~ ProductHausman, value.var = "hausman")
+# widen_total_sales <- dcast(wide_format, store + week + brand_name + size ~ ProductSales, value.var = "total_sales")
+
+
+data_col <-left_join(widen_price, widen_cost) %>% 
+  left_join(widen_beta) %>%
+  left_join(widen_hausman) %>%
+#  left_join(widen_total_sales) %>%
+#  left_join(widen_index) %>%
+  left_join(regdata)
+
+data_col[is.na(data_col)] <- 0
+```
+
+Create a variable in the data set for each dummy interaction variable to be estimated: beta term, price-dummy, cost-dummy, hausman-dummy
+```{r}
+data_w_int <- data_col
+for (i in unique(data$brand_name)) {
+  for (j in unique(data$size)) {
+    data_w_int[, paste(i, j, i, "Beta", sep = "_")] <- data_col[, paste(i, j, sep = "")] * data_col[, paste(i, "Beta", sep = "")] # beta_term - dummy interactions
+    for (k in unique(data$size)) {
+      data_w_int[, paste(i, j, i, k, "Price", sep = "_")] <- data_col[, paste(i, j, sep = "")] * data_col[, paste(i, k, "Price", sep = "")] # price-dummy interactions
+      data_w_int[, paste(i, j, i, k, "Cost", sep = "_")] <- data_col[, paste(i, j, sep = "")] * data_col[, paste(i, k, "Cost", sep = "")] # cost-dummy interactions
+      data_w_int[, paste(i, j, i, k, "Hausman", sep = "_")] <- data_col[, paste(i, j, sep = "")] * data_col[, paste(i, k, "Hausman", sep = "")] # hausman-dummy interactions
+    }
+  }
+}
+```
+
+
+Estimate the model 3 ways: regular ols, IV w cost as IV, and IV w Hausman IV
+
+__d.__
+i.
+Regular OLS
+```{r}
+reg_ols <- model1(data_w_int)
+Regular_OLS <- as.array(reg_ols$coefficients[10:36])
+Regular_OLS <- as.data.frame(Regular_OLS)
+```
+
+ii.
+IVReg with cost as an instrument
+```{r}
+library(AER)
+cost_iv <- model2(data_w_int)
+Cost_Instrument <- as.array(cost_iv$coefficients[10:36])
+Cost_Instrument <- as.data.frame(Cost_Instrument)
+```
+
+iii.
+IVReg with Hausman Instruments
+```{r}
+library(AER)
+haus_iv <- model3(data_w_int)
+haus_iv
+```
+
+iv.
+Estimate the middle level of the model, using OLS to estimate the following log-log specification
+```{r}
+View(regdata)
+# Create a variable for the stone price index
+library(plyr)
+stone <- function(x,y) {
+  sum(x*log(y))
+}
+regdata <- ddply(regdata, .(store, week, brand_name), transform, priceindex = stone(exp_share, price))
+# I am trying to collapse all Tylenols in a given store and week into one row: Tylenol. That is, I am removing the size column since we only care about the total segment, rather than the individual sizes within the segment.
+collapse <- regdata %>%
+  group_by(brand_name, store, week, priceindex, total_sales) %>%
+  summarise_() %>%
+  arrange(week, store, brand_name, priceindex) %>% 
+  mutate(
+    lpriceindex = log(priceindex),
+    Tylenol = ifelse(brand_name == "Tylenol",1,0), 
+    Advil = ifelse(brand_name == "Advil",1,0), 
+    Bayer = ifelse(brand_name == "Bayer",1,0)) %>% 
+  mutate(
+    lTylenolPriceIndex = priceindex * Tylenol,
+    lAdvilPriceIndex = priceindex * Advil,
+    lBayerPriceIndex = priceindex * Bayer)
+
+
+# Create a total expenditure column for all segments
+collapse$totalexp = collapse$total_sales * collapse$priceindex
+collapse
+totalexp <- function(x) {
+  sum(x)
+}
+pls <- ddply(collapse, .(store, week), transform, totalexpseg = totalexp(totalexp))
+middleregdata <- pls %>% 
+  select(brand_name, total_sales, Tylenol:lBayerPriceIndex, totalexpseg) %>% 
+  mutate(
+    ltotal_sales = log(total_sales),
+    ltotalexpseg = log(totalexpseg))
+  
+middlereg <- lm(ltotal_sales ~ 
+                  Tylenol + Advil + 
+                  lTylenolPriceIndex + lAdvilPriceIndex + lBayerPriceIndex + 
+                  ltotalexpseg,
+                data = middleregdata)
+middlereg$coefficients
+```
+__NOTE__
+_Based only on the coefficient of Bayer's Price Index term, total quantity of Bayer sold is positively related to the Price Index for Bayer. This is inconsistent with Economic Theory. In my middle level estimate, however, the dummy I do not include is that for Bayer. If we omit Tylenol, the Bayer Fixed effect would be -2.59 and for omitting Advil, BFE = -1.40. Max value of log(BayerPriceIndex) = 1.58 and therefor max of the BayerPriceIndex term = 1.58 * 0.40 = .632. Combining the two alternative Bayer dummies we could have with the greatest value that the other bayer term can take, we get B|TY: -1.958 and B|AD: -.768. This means that we have the appropriate negative relationship between price of bayer and quantity of bayer sold._
+
+__??__
+_Though, since the decrease in quantity is greatest when prices lower, is this still inconsistent with the theory?_
+__??__
+
+
+v.
+```{r}
+incdata <- read_csv("~/Documents/R/132/PSET 4/OTC_Incomes.csv")
+upper <- left_join(incdata, collapse)
+
+totalmedQuantity <- function(x) {
+  log(sum(x))
+}
+overallPriceIndex <- function(x, y) {
+  sum((x / sum(x)) * y)
+}
+upper <- ddply(upper, .(store, week), transform, 
+               ltotalQ = totalmedQuantity(total_sales),
+               overallP = overallPriceIndex(totalexp, lpriceindex))
+
+upper <- group_by(upper, store, week, ltotalQ, overallP, average_income) %>% 
+  summarize_()
+    
+upperlevel <- lm(ltotalQ ~ overallP + average_income, data = upper)
+upperlevel
+```
+
+
+vi.
+```{r}
+Regular_OLS <- as.array(reg_ols$coefficients[10:36])
+
+Cost_Instrument <- as.array(cost_iv$coefficients[10:36])
+```
+
+
+```{r}
+Hausman_Instrument <- as.array(haus_iv$coefficients[10:36])
+
+gammas <- tibble(
+  Gamma = 
+    c("Tylenol_25_Tylenol_25_Price", "Tylenol_25_Tylenol_50_Price", "Tylenol_25_Tylenol_100_Price", "Tylenol_50_Tylenol_25_Price", "Tylenol_50_Tylenol_50_Price", 
+  "Tylenol_50_Tylenol_100_Price", "Tylenol_100_Tylenol_25_Price", "Tylenol_100_Tylenol_50_Price", "Tylenol_100_Tylenol_100_Price", "Advil_25_Advil_25_Price", 
+  "Advil_25_Advil_50_Price", "Advil_25_Advil_100_Price", "Advil_50_Advil_25_Price", "Advil_50_Advil_50_Price", "Advil_50_Advil_100_Price", 
+  "Advil_100_Advil_25_Price", 
+  "Advil_100_Advil_50_Price", "Advil_100_Advil_100_Price", "Bayer_25_Bayer_25_Price", "Bayer_25_Bayer_50_Price", "Bayer_25_Bayer_100_Price", 
+  "Bayer_50_Bayer_25_Price", 
+  "Bayer_50_Bayer_50_Price", "Bayer_50_Bayer_100_Price", "Bayer_100_Bayer_25_Price", "Bayer_100_Bayer_50_Price", "Bayer_100_Bayer_100_Price"),
+  
+  RegOLS = Regular_OLS,
+  Cost_IV = Cost_Instrument,
+  Haus_IV = Hausman_Instrument
+)
+
+View(gammas)
+```
+For the segment expenditure share, an increase in the price of a given product within that segment should be negatively correlated with it's expenditure share within that segment. Alternatively, if the other products within that segment have an increase in price, it makes sense for more of the given product to be demanded and thus there would be a positive correlation between market share of a product and the price of the other products, within a segment.
+
+So, for $w_{ty25}$, we would expect $\gamma_{ty25,ty25} \leq 0$ and $\gamma_{ty25,ty50} \ , \ \gamma_{ty25,ty100} \geq 0$. The model with Hausman instruments seems to best produce the expected signs.
+
+
+
+
+
+__When Time Permits__
+vii.
+_Conditional Elasticities_
+```{r}
+
+```
+
+
+viii.
+_Unconditional Elasticities_
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
